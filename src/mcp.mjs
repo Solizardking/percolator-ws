@@ -3,19 +3,12 @@
 // reserved write names) go through gateMcp (x402 USDC or $CLAWD SIWS holder).
 import { randomUUID } from 'node:crypto';
 import { gateMcp, siwsChallenge, siwsVerify, protectedResourceMetadata, sendWebResponse } from './mcp-access.mjs';
-import { PERCOLATOR_READ_TOOLS } from './percolator.mjs';
+import { PERCOLATOR_READ_TOOLS, PERCOLATOR_WRITE_TOOLS as WRITE_FROM_MODULE } from './percolator.mjs';
 
 const RO = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 
 // Write tool names from percolator_venue — never registered here, but reserved for gating if enabled later.
-export const PERCOLATOR_WRITE_TOOLS = [
-  'percolator_create_market',
-  'percolator_open_position',
-  'percolator_close_position',
-  'percolator_liquidate',
-  'percolator_add_margin',
-  'percolator_remove_margin',
-];
+export const PERCOLATOR_WRITE_TOOLS = WRITE_FROM_MODULE;
 export const PROTECTED_TOOLS = new Set(PERCOLATOR_WRITE_TOOLS);
 
 export function createMcp({ health, env = process.env, fetchImpl = fetch, percolator = null, now = Date.now } = {}) {
