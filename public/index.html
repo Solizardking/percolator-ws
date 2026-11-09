@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Percolator</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0b0f14; color: #e8eef7; margin: 0; }
+    header { padding: 16px 24px; border-bottom: 1px solid #1e2a3a; display: flex; gap: 12px; align-items: center; }
+    .tabs button { background: #152033; color: #9fb3c8; border: 0; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+    .tabs button.active { background: #2a6df4; color: #fff; }
+    #feed { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; padding: 16px 24px; }
+    .card { background: #121a24; border: 1px solid #243246; border-radius: 12px; padding: 14px; }
+    .card .name { font-weight: 600; font-size: 16px; }
+    .badge { display: inline-block; margin-top: 8px; font-size: 12px; color: #7dd3a7; }
+    img.logo { width: 40px; height: 40px; border-radius: 8px; background: #2a6df4; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Percolator</strong>
+    <nav class="tabs">
+      <button data-tab="all" class="active">all</button>
+      <button data-tab="pump">pump</button>
+      <button data-tab="stonk">stonk</button>
+      <button data-tab="raydium">raydium</button>
+      <button data-tab="fomo-sol">fomo-sol</button>
+      <button data-tab="fills">fills</button>
+      <button data-tab="agents">agents</button>
+      <button data-tab="migrations">migrations</button>
+      <button data-tab="fomo-rh">fomo-rh</button>
+    </nav>
+    <span id="status">connecting…</span>
+  </header>
+  <main id="feed"></main>
+  <script>
+    const feed = document.getElementById('feed');
+    const status = document.getElementById('status');
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(proto + '://' + location.host + '/ws');
+    const cards = new Map();
+    function upsert(id, name, badge) {
+      let el = cards.get(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'card';
+        el.dataset.id = id;
+        el.innerHTML = '<img class="logo" alt="" width="40" height="40" src="data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#2a6df4"/></svg>') + '" /><div class="name"></div><div class="badge"></div>';
+        feed.prepend(el);
+        cards.set(id, el);
+      }
+      el.querySelector('.name').textContent = name;
+      el.querySelector('.badge').textContent = badge;
+    }
+    // Seed cards so page_check has something without waiting for live ticks
+    ['SOL-PERP','BTC-PERP','ETH-PERP'].forEach((n,i) => upsert('seed-'+i, n, 'percolator'));
+    ws.onopen = () => { status.textContent = 'live'; };
+    ws.onmessage = (ev) => {
+      try {
+        const j = JSON.parse(ev.data);
+        if (j.type === 'status') status.textContent = 'live · markets ' + (j.totalLaunches || 0);
+        if (j.type === 'token-launch' || j.type === 'market') upsert(j.slab || j.symbol || String(Date.now()), j.name || j.symbol || 'market', j.source || 'percolator');
+      } catch {}
+    };
+    document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+      document.querySelectorAll('[data-tab]').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+    }));
+  </script>
+</body>
+</html>

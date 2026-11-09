@@ -1,0 +1,20 @@
+{
+  "name": "percolator-ws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "percolator.tech WSS + paid MCP (percolator_* reads via imperial-perps; writes off)",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "start:py": "cd python && python3 server_reads.py",
+    "test": "node test/test-lag.mjs",
+    "test:access": "node --test test/mcp-access.test.mjs",
+    "test:mcp": "node --test test/mcp-access.test.mjs test/percolator.test.mjs",
+    "test:unit": "node --test test/mcp-access.test.mjs test/percolator.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "bs58": "^6.0.0",
+    "ws": "^8.18.0"
+  }
+}

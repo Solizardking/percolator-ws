@@ -1,0 +1,10 @@
+node_modules/
+.env
+python/.venv/
+__pycache__/
+*.png
+.DS_Store
+*.pyc
+.python-version
+*.log
+out.png
