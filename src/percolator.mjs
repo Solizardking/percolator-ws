@@ -8,6 +8,20 @@ export const PERCOLATOR_READ_TOOLS = [
   'percolator_detect_venue',
 ];
 
+export const PERCOLATOR_WRITE_TOOLS = [
+  'percolator_create_user_market',
+  'percolator_deposit',
+  'percolator_withdraw',
+  'percolator_open_position',
+  'percolator_close_position',
+  'percolator_update_oracle',
+];
+
+export function writesEnabled(env = process.env) {
+  const v = String(env.PERCOLATOR_MAINNET_WRITES_ENABLED || env.PERCOLATOR_WRITES_ENABLED || '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
 const SCHEMAS = {
   percolator_list_markets: {
     type: 'object',
@@ -51,6 +65,55 @@ const SCHEMAS = {
       min_liquidity: { type: 'integer', default: 1_000_000_000 },
     },
   },
+  percolator_create_user_market: {
+    type: 'object',
+    required: ['mint', 'collateral_mint', 'creator', 'bond'],
+    properties: {
+      mint: { type: 'string' }, collateral_mint: { type: 'string' }, creator: { type: 'string' },
+      bond: { type: 'integer' }, cluster: { type: 'string', enum: ['devnet', 'mainnet', 'localnet'], default: 'devnet' },
+      confirm: { type: 'boolean', default: false }, confirm_token: { type: 'string', default: '' },
+    },
+  },
+  percolator_deposit: {
+    type: 'object', required: ['slab', 'owner', 'amount'],
+    properties: {
+      slab: { type: 'string' }, owner: { type: 'string' }, amount: { type: 'integer' },
+      cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
+      confirm_token: { type: 'string', default: '' }, init: { type: 'boolean', default: false },
+    },
+  },
+  percolator_withdraw: {
+    type: 'object', required: ['slab', 'owner', 'amount'],
+    properties: {
+      slab: { type: 'string' }, owner: { type: 'string' }, amount: { type: 'integer' },
+      cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
+      confirm_token: { type: 'string', default: '' },
+    },
+  },
+  percolator_open_position: {
+    type: 'object', required: ['slab', 'owner', 'lp_owner', 'size'],
+    properties: {
+      slab: { type: 'string' }, owner: { type: 'string' }, lp_owner: { type: 'string' }, size: { type: 'integer' },
+      cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
+      confirm_token: { type: 'string', default: '' },
+    },
+  },
+  percolator_close_position: {
+    type: 'object', required: ['slab', 'owner', 'lp_owner'],
+    properties: {
+      slab: { type: 'string' }, owner: { type: 'string' }, lp_owner: { type: 'string' },
+      cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
+      confirm_token: { type: 'string', default: '' },
+    },
+  },
+  percolator_update_oracle: {
+    type: 'object', required: ['slab', 'keeper'],
+    properties: {
+      slab: { type: 'string' }, keeper: { type: 'string' },
+      cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
+      confirm_token: { type: 'string', default: '' },
+    },
+  },
 };
 
 const DESCRIPTIONS = {
@@ -59,17 +122,27 @@ const DESCRIPTIONS = {
   percolator_oracle_price: 'Current index price of a market (pool EMA or admin-pushed).',
   percolator_quote: 'Quote a position (size in base units, +long/-short): notional, margin, fee, leverage cap.',
   percolator_detect_venue: 'Detect pump.fun / PumpSwap / LaunchLab pool for a mint and perps eligibility. Read-only.',
+  percolator_create_user_market: 'Create a permissionless perps market (unsigned on mainnet when enabled). UNAUDITED.',
+  percolator_deposit: 'Deposit collateral. Mainnet: unsigned tx for user wallet when enabled. UNAUDITED.',
+  percolator_withdraw: 'Withdraw collateral. Mainnet: unsigned tx for user wallet when enabled. UNAUDITED.',
+  percolator_open_position: 'Open/increase position. Mainnet: unsigned tx when enabled. UNAUDITED.',
+  percolator_close_position: 'Close position. Mainnet: unsigned tx when enabled. UNAUDITED.',
+  percolator_update_oracle: 'Update pool oracle EMA. Mainnet: unsigned tx when enabled. UNAUDITED.',
 };
 
 export function createPercolator({ env = process.env, fetchImpl = fetch, callImpl = null } = {}) {
   const base = (env.PERCOLATOR_PY_MCP_URL || 'http://127.0.0.1:8791/mcp').replace(/\/$/, '');
-  const tools = PERCOLATOR_READ_TOOLS.map((name) => ({
+  const enabledWrites = writesEnabled(env);
+  const catalog = [...PERCOLATOR_READ_TOOLS, ...(enabledWrites ? PERCOLATOR_WRITE_TOOLS : [])];
+  const tools = catalog.map((name) => ({
     name,
     description: DESCRIPTIONS[name],
     inputSchema: SCHEMAS[name],
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: PERCOLATOR_WRITE_TOOLS.includes(name)
+      ? { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+      : { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }));
-  const names = new Set(PERCOLATOR_READ_TOOLS);
+  const names = new Set(catalog);
 
   async function proxyCall(name, args) {
     if (callImpl) return callImpl(name, args);
@@ -102,10 +175,12 @@ export function createPercolator({ env = process.env, fetchImpl = fetch, callImp
     call: proxyCall,
     info: () => ({
       reads: PERCOLATOR_READ_TOOLS.length,
-      writes: 0,
+      writes: enabledWrites ? PERCOLATOR_WRITE_TOOLS.length : 0,
+      writesEnabled: enabledWrites,
       pyMcp: base,
       tradingEnabled: false,
       keypairSet: false,
+      mainnetWritesEnabled: writesEnabled(env),
     }),
   };
 }

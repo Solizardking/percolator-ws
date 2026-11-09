@@ -51,3 +51,12 @@ To put this on **percolator.tech**:
 3. DNS: point `percolator.tech` (and `www`) A/CNAME at the Railway service; terminate TLS.
 4. Confirm facilitator `https://musebook.trade/api/x402` accepts `payTo` and that SIWS domain text matches the public host.
 5. Do **not** enable write tools or set a trading keypair on the public host.
+
+## Mainnet unsigned writes (opt-in)
+
+Set `PERCOLATOR_MAINNET_WRITES_ENABLED=true` (and the same on the Python sidecar) to advertise
+write tools. Calls still require x402 / $CLAWD holder payment, then venue gates
+`confirm=true` + `confirm_token=CONFIRM_PERCOLATOR_TX` + `cluster=mainnet`. The server
+**never** signs or broadcasts mainnet txs (returns `transaction_base64` + `signers_needed`).
+Program is **unaudited**. Never set `PERCOLATOR_DEVNET_KEYPAIR` / `IMPERIAL_TRADING_ENABLED` /
+`PERCOLATOR_MAINNET_KEYPAIR` on this host.

@@ -29,12 +29,32 @@ READ_NAMES = {
     "percolator_quote",
     "percolator_detect_venue",
 }
+WRITE_NAMES = {
+    "percolator_create_user_market",
+    "percolator_deposit",
+    "percolator_withdraw",
+    "percolator_open_position",
+    "percolator_close_position",
+    "percolator_update_oracle",
+}
+
+_writes_on = os.environ.get("PERCOLATOR_MAINNET_WRITES_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+# Also expose write tools when PERCOLATOR_WRITES_ENABLED (devnet unsigned path via venue gates)
+_writes_on = _writes_on or os.environ.get("PERCOLATOR_WRITES_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+ALLOWED = set(READ_NAMES) | (WRITE_NAMES if _writes_on else set())
 
 mcp = FastMCP(
     "percolator-tech",
     instructions=(
-        "CLAWD Percolator read tools for percolator.tech. "
-        "Writes are disabled on this host. Cluster defaults to devnet."
+        "CLAWD Percolator tools for percolator.tech. "
+        "Reads always on. Write tools register only when PERCOLATOR_MAINNET_WRITES_ENABLED "
+        "or PERCOLATOR_WRITES_ENABLED is true; mainnet still requires confirm gates and never "
+        "server-signs/sends. Program is unaudited."
     ),
 )
 
@@ -44,8 +64,8 @@ _registered: list[str] = []
 def _tool(*args, **kwargs):
     def deco(fn):
         name = fn.__name__
-        if name not in READ_NAMES:
-            return fn  # skip writes
+        if name not in ALLOWED:
+            return fn  # skip unregistered writes
         _registered.append(name)
         return mcp.tool(*args, **kwargs)(fn)
     return deco
