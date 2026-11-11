@@ -50,6 +50,10 @@ ALLOWED = set(READ_NAMES) | (WRITE_NAMES if _writes_on else set())
 
 mcp = FastMCP(
     "percolator-tech",
+    # The Node /mcp proxy is stateless (one POST per tools/call, no session
+    # handshake), so the sidecar must not require an MCP session id.
+    stateless_http=True,
+    json_response=True,
     instructions=(
         "CLAWD Percolator tools for percolator.tech. "
         "Reads always on. Write tools register only when PERCOLATOR_MAINNET_WRITES_ENABLED "
