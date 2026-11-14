@@ -8,8 +8,23 @@ Local **WSS + paid MCP** server for [percolator.tech](https://percolator.tech).
   - Write tools — **not registered** (disabled). Reserved names still 402 via x402 if called.
   - x402 Solana USDC (tiers $0.002 / $0.01 / $0.05) via `MCP_X402_FACILITATOR_URL` (default `https://musebook.trade/api/x402`)
   - `$CLAWD` holders free after SIWS (`POST /auth/siws/challenge` + `/verify` → 1h Bearer)
-- **WSS** on `/` and `/ws` (status + optional simulated market ticks)
+- **WSS** on `/` and `/ws`: live `price.updated` feed (see below) + status + optional simulated market ticks
 - **Python sidecar** reuses `imperial-perps-mcp-server` `percolator_venue.py` + vendored `clawd_perps/` (reads only)
+
+## Live price feed (WSS)
+
+The launch app (`percolator-launch`, `useLivePrice.ts`) consumes this feed:
+
+- Client connects to `/ws`, then sends `{"type":"subscribe","slabAddress":"<slab>"}` (`slab` also accepted). `{"type":"unsubscribe","slabAddress":"<slab>"}` on cleanup.
+- Server polls that market's own on-chain oracle through the Python sidecar (`percolator_oracle_price`, pool EMA / authority price) — one shared poller per slab, `FEED_POLL_MS` (default `3000`), cluster `FEED_CLUSTER` (default `devnet`) — and emits on change (plus a 15s resend):
+  `{"type":"price.updated","slab":"<slab>","price":<USD float>,"priceE6":"<int string>","timestamp":<ms>,"slot":<last_update_slot>,"source":"<oracle source>","cluster":"devnet","simulated":false}`
+- Invalid slab -> `{"type":"error","code":"bad_slab"}`. Oracle/sidecar failure -> throttled `{"type":"error","code":"oracle_unavailable","slab":"<slab>"}` and the feed turns `degraded` — a failed poll **never** produces a price.
+- A 30s `{"type":"status",...}` heartbeat is kept type-distinct from price messages, so "socket open" is never confused with "prices flowing".
+- `/health` reports the feed honestly: `feeds.wss.state` is `idle` (no subscriptions), `open` (**only** after a successful oracle poll), or `degraded`; `feeds.wss.subscriptions` is the real registry count; `ingestLagSec` is seconds since the last successful poll (`null` if none yet); `feeds.simulated` mirrors `SIMULATE_MARKET_TICKS`.
+
+**Simulated != live.** `SIMULATE_MARKET_TICKS=1` emits demo `token-launch` ticks labelled `"simulated":true`. They carry no price, are never sent as `price` / `price.updated`, and are not counted as markets or launches.
+
+Tests: `node --test test/test-feed.mjs` (mocked sidecar; covers subscribe -> `price.updated`, unsubscribe silence, bad slab, sidecar-down degraded).
 
 ## Safety
 
