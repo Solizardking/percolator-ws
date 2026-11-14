@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createMcp } from './mcp.mjs';
 import { createPercolator } from './percolator.mjs';
+import { createFeed, isValidSlab } from './feed.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -25,12 +26,10 @@ if (String(env.IMPERIAL_TRADING_ENABLED || '').toLowerCase() === 'true') {
 
 const percolator = createPercolator({ env });
 
-// Minimal "feed" state so ported reconnect/lag tests have a surface.
-const feed = {
-  wss: { state: 'open', reconnects: 0, subscriptions: 2 },
-  backfilled: 0,
-  rpc: { queued: 0 },
-};
+// Live price feed: slab subscriptions polled against the sidecar oracle.
+// Its state is derived, never asserted: 'open' only after a successful poll.
+const priceFeed = createFeed({ call: (name, args) => percolator.call(name, args), env });
+const feedExtra = { backfilled: 0, rpc: { queued: 0 }, reconnects: 0 };
 let totalMarkets = 0;
 let forceHooks = env.ENABLE_TEST_HOOKS === '1';
 
@@ -42,9 +41,14 @@ function health() {
     clients: wss.clients.size,
     totalLaunches: totalMarkets, // lag test field name
     totalMarkets,
-    ingestLagSec: 0,
+    ingestLagSec: priceFeed.ingestLagSec(),
     percolator: percolator.info(),
-    feeds: { wss: { ...feed.wss }, backfilled: feed.backfilled, rpc: { ...feed.rpc } },
+    feeds: {
+      wss: { state: priceFeed.state(), reconnects: feedExtra.reconnects, subscriptions: priceFeed.subscriptionCount() },
+      backfilled: feedExtra.backfilled,
+      rpc: { ...feedExtra.rpc },
+      simulated: env.SIMULATE_MARKET_TICKS === '1',
+    },
     mcp: { path: '/mcp', reads: percolator.info().reads, writes: 0 },
   };
 }
@@ -73,12 +77,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (forceHooks && url.pathname === '/__test/force-disconnect' && req.method === 'POST') {
-      feed.wss.state = 'closed';
-      feed.wss.reconnects += 1;
+      feedExtra.reconnects += 1;
       setTimeout(() => {
-        feed.wss.state = 'open';
-        feed.wss.subscriptions = 2;
-        feed.backfilled += 1;
+        feedExtra.backfilled += 1;
         totalMarkets += 1;
         broadcast({ type: 'status', totalLaunches: totalMarkets, connected: true });
         broadcast({ type: 'market', source: 'percolator', time: new Date().toISOString(), slab: 'test' });
@@ -109,36 +110,63 @@ function broadcast(o) {
 }
 
 wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({
+  const sendStatus = () => ws.send(JSON.stringify({
     type: 'status',
     connected: true,
     uptime: Math.round((Date.now() - startedAt) / 1000),
     totalLaunches: totalMarkets,
     clients: wss.clients.size,
     service: 'percolator-ws',
+    feed: priceFeed.state(),
+    subscriptions: priceFeed.subscriptionCount(),
   }));
-  // Seed one market event so lag test can observe something within the window when hooks/simulated.
+  sendStatus();
+  // Heartbeat: status only, type-distinct from price.updated so clients
+  // can tell "socket alive" apart from "prices are flowing".
+  const heartbeat = setInterval(() => { if (ws.readyState === 1) sendStatus(); }, 30_000);
+  heartbeat.unref?.();
+
+  let simIv = null;
   if (env.SIMULATE_MARKET_TICKS === '1') {
+    // Simulated ticks are demo data only: labelled simulated:true, a
+    // non-price message type, and never counted as real markets/launches.
     const tick = () => {
       if (ws.readyState !== 1) return;
-      totalMarkets += 1;
       ws.send(JSON.stringify({
         type: 'token-launch',
         source: 'percolator',
         time: new Date().toISOString(),
         name: 'perps',
         symbol: 'PERP',
+        simulated: true,
       }));
     };
     tick();
-    const iv = setInterval(tick, 5000);
-    ws.on('close', () => clearInterval(iv));
+    simIv = setInterval(tick, 5000);
   }
+
   ws.on('message', (raw) => {
     try {
       const j = JSON.parse(String(raw));
-      if (j?.type === 'ping') ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
+      if (j?.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
+      } else if (j?.type === 'subscribe' || j?.type === 'unsubscribe') {
+        const slab = j.slabAddress || j.slab;
+        if (!isValidSlab(slab)) {
+          ws.send(JSON.stringify({ type: 'error', code: 'bad_slab', slab: typeof slab === 'string' ? slab : null }));
+        } else if (j.type === 'subscribe') {
+          priceFeed.subscribe(ws, slab);
+        } else {
+          priceFeed.unsubscribe(ws, slab);
+        }
+      }
     } catch {}
+  });
+
+  ws.on('close', () => {
+    clearInterval(heartbeat);
+    if (simIv) clearInterval(simIv);
+    priceFeed.removeClient(ws);
   });
 });
 
