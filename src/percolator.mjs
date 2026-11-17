@@ -6,6 +6,9 @@ export const PERCOLATOR_READ_TOOLS = [
   'percolator_oracle_price',
   'percolator_quote',
   'percolator_detect_venue',
+  'percolator_gm8z_list_markets',
+  'percolator_gm8z_read_market',
+  'percolator_gm8z_oracle_price',
 ];
 
 export const PERCOLATOR_WRITE_TOOLS = [
@@ -65,6 +68,27 @@ const SCHEMAS = {
       min_liquidity: { type: 'integer', default: 1_000_000_000 },
     },
   },
+  percolator_gm8z_list_markets: {
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+    },
+  },
+  percolator_gm8z_read_market: {
+    type: 'object',
+    required: ['slab'],
+    properties: {
+      slab: { type: 'string' },
+      include_accounts: { type: 'boolean', default: false },
+    },
+  },
+  percolator_gm8z_oracle_price: {
+    type: 'object',
+    required: ['slab'],
+    properties: {
+      slab: { type: 'string' },
+    },
+  },
   percolator_create_user_market: {
     type: 'object',
     required: ['mint', 'collateral_mint', 'creator', 'bond'],
@@ -122,6 +146,9 @@ const DESCRIPTIONS = {
   percolator_oracle_price: 'Current index price of a market (pool EMA or admin-pushed).',
   percolator_quote: 'Quote a position (size in base units, +long/-short): notional, margin, fee, leverage cap.',
   percolator_detect_venue: 'Detect pump.fun / PumpSwap / LaunchLab pool for a mint and perps eligibility. Read-only.',
+  percolator_gm8z_list_markets: 'List GM8z (toly\'s percolator program on Solana MAINNET) perps markets/slabs. Read-only.',
+  percolator_gm8z_read_market: 'Decode a GM8z mainnet slab: config, oracle state, engine totals (optionally accounts). Read-only.',
+  percolator_gm8z_oracle_price: 'Current GM8z mainnet mark price (authority push or Pyth; no pool oracle exists). Read-only.',
   percolator_create_user_market: 'Create a permissionless perps market (unsigned on mainnet when enabled). UNAUDITED.',
   percolator_deposit: 'Deposit collateral. Mainnet: unsigned tx for user wallet when enabled. UNAUDITED.',
   percolator_withdraw: 'Withdraw collateral. Mainnet: unsigned tx for user wallet when enabled. UNAUDITED.',

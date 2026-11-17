@@ -20,6 +20,7 @@ if os.environ.get("IMPERIAL_TRADING_ENABLED", "").lower() in ("1", "true", "yes"
     raise SystemExit("REFUSED: IMPERIAL_TRADING_ENABLED must not be set on percolator-ws")
 
 from mcp.server.fastmcp import FastMCP  # type: ignore
+import gm8z
 import percolator_venue
 
 READ_NAMES = {
@@ -28,6 +29,10 @@ READ_NAMES = {
     "percolator_oracle_price",
     "percolator_quote",
     "percolator_detect_venue",
+    # GM8z mainnet program reads (M4) — additive, mainnet-only, read-only.
+    "percolator_gm8z_list_markets",
+    "percolator_gm8z_read_market",
+    "percolator_gm8z_oracle_price",
 }
 WRITE_NAMES = {
     "percolator_create_user_market",
@@ -76,6 +81,7 @@ def _tool(*args, **kwargs):
 
 
 percolator_venue.register(_tool)
+gm8z.register_gm8z(_tool)
 
 # FastMCP streamable HTTP — path /mcp when mounted; standalone uses its own.
 if __name__ == "__main__":

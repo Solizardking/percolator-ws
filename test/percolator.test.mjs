@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { createPercolator, PERCOLATOR_READ_TOOLS, PERCOLATOR_WRITE_TOOLS, writesEnabled } from '../src/percolator.mjs';
 import { PROTECTED_TOOLS } from '../src/mcp.mjs';
 
-test('read catalog is exactly the five venue reads', () => {
+test('read catalog is exactly the five venue reads plus the three GM8z mainnet reads', () => {
   assert.deepEqual([...PERCOLATOR_READ_TOOLS].sort(), [
     'percolator_detect_venue',
+    'percolator_gm8z_list_markets',
+    'percolator_gm8z_oracle_price',
+    'percolator_gm8z_read_market',
     'percolator_list_markets',
     'percolator_oracle_price',
     'percolator_quote',
