@@ -108,7 +108,20 @@ def decode_slab(d: bytes) -> dict:
             "initial_margin_bps": _u("Q", d, e + 64),
             "trading_fee_bps": _u("Q", d, e + 72),
             "max_accounts": _u("Q", d, e + 80),
+            "maintenance_fee_per_slot": _u128(d, e + 120),
+            "max_crank_staleness_slots": _u("Q", d, e + 136),
+            "liquidation_fee_bps": _u("Q", d, e + 144),
+            "liquidation_fee_cap": _u128(d, e + 152),
+            "liquidation_buffer_bps": _u("Q", d, e + 168),
+            "min_liquidation_abs": _u128(d, e + 176),
         },
+        # Funding (engine/src/percolator.rs RiskEngine): index is quote-per-base e6;
+        # rate is bps per slot in effect since last_funding_slot (>0 => longs pay shorts).
+        "current_slot": _u("Q", d, e + 192),
+        "funding_index_e6": _i128(d, e + 200),
+        "last_funding_slot": _u("Q", d, e + 216),
+        "funding_rate_bps_per_slot": _u("q", d, e + 224),
+        "last_crank_slot": _u("Q", d, e + 232),
     }
     if tier:
         _, _, nu, ao = TIERS[tier]
@@ -128,6 +141,9 @@ def decode_slab(d: bytes) -> dict:
                     "pnl": _i128(d, a + 32),
                     "position_size": _i128(d, a + 80),
                     "entry_price_e6": _u("Q", d, a + 96),
+                    "funding_index_e6": _i128(d, a + 104),
+                    "matcher_program": _b58(d[a + 120:a + 152]),
+                    "matcher_context": _b58(d[a + 152:a + 184]),
                     "owner": _b58(d[a + 184:a + 216]),
                 })
                 word &= word - 1

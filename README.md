@@ -4,12 +4,14 @@ Local **WSS + paid MCP** server for [percolator.tech](https://percolator.tech).
 
 - **MCP** at `/mcp` (Streamable HTTP), mirroring clawd-ws-v2 / pumpai access:
   - `initialize`, `tools/list`, `resources/*` — free
-  - `percolator_*` **reads** — free (`list_markets`, `read_market`, `oracle_price`, `quote`, `detect_venue`)
-  - Write tools — **not registered** (disabled). Reserved names still 402 via x402 if called.
+  - `percolator_*` **reads** — free (`list_markets`, `read_market`, `oracle_price`, `quote`, `detect_venue`, `positions`)
+  - Write tools — **off by default**. With `PERCOLATOR_WRITES_ENABLED=true` they return **unsigned** transactions plus a
+    devnet simulation for the owner's wallet to sign; the server never signs or sends. Calls go through the x402 / $CLAWD gate.
+    Flow, formulas and flags: [docs/agent-trading.md](docs/agent-trading.md).
   - x402 Solana USDC (tiers $0.002 / $0.01 / $0.05) via `MCP_X402_FACILITATOR_URL` (default `https://musebook.trade/api/x402`)
   - `$CLAWD` holders free after SIWS (`POST /auth/siws/challenge` + `/verify` → 1h Bearer)
 - **WSS** on `/` and `/ws`: live `price.updated` feed (see below) + status + optional simulated market ticks
-- **Python sidecar** reuses `imperial-perps-mcp-server` `percolator_venue.py` + vendored `clawd_perps/` (reads only)
+- **Python sidecar** `python/percolator_venue.py` + vendored `clawd_perps/` (reads; unsigned builders behind the flag)
 
 ## Live price feed (WSS)
 
@@ -49,6 +51,7 @@ Without the Python sidecar, inject `callImpl` in tests or point `PERCOLATOR_PY_M
 
 ```bash
 npm run test:unit          # access + catalog (mocked facilitator; no real payments)
+python -m pytest -q python/tests   # builders, positions, quote math (RUN_DEVNET_SIM=1 adds a devnet simulation)
 ENABLE_TEST_HOOKS=1 SIMULATE_MARKET_TICKS=1 MCP_AUTH_SECRET=dev-secret-at-least-24-chars npm start &
 node test/test-lag.mjs ws://127.0.0.1:8787 8
 node test/test-reconnect.mjs http://127.0.0.1:8787
@@ -67,11 +70,12 @@ To put this on **percolator.tech**:
 4. Confirm facilitator `https://musebook.trade/api/x402` accepts `payTo` and that SIWS domain text matches the public host.
 5. Do **not** enable write tools or set a trading keypair on the public host.
 
-## Mainnet unsigned writes (opt-in)
+## Unsigned writes (opt-in)
 
-Set `PERCOLATOR_MAINNET_WRITES_ENABLED=true` (and the same on the Python sidecar) to advertise
-write tools. Calls still require x402 / $CLAWD holder payment, then venue gates
-`confirm=true` + `confirm_token=CONFIRM_PERCOLATOR_TX` + `cluster=mainnet`. The server
-**never** signs or broadcasts mainnet txs (returns `transaction_base64` + `signers_needed`).
-Program is **unaudited**. Never set `PERCOLATOR_DEVNET_KEYPAIR` / `IMPERIAL_TRADING_ENABLED` /
-`PERCOLATOR_MAINNET_KEYPAIR` on this host.
+`PERCOLATOR_WRITES_ENABLED=true` (Node service and Python sidecar) lists the write tools. On devnet they build
+an unsigned transaction (owner = fee payer and only signer) and simulate it. Mainnet additionally needs
+`PERCOLATOR_MAINNET_WRITES_ENABLED=true` and `confirm=true` + `confirm_token=CONFIRM_PERCOLATOR_TX` +
+`cluster=mainnet`; it is still unsigned. The server **never** signs or broadcasts on any cluster
+(returns `transaction_base64` + `signers_needed` + `simulation`). Program is **unaudited**. Never set
+`PERCOLATOR_DEVNET_KEYPAIR` / `IMPERIAL_TRADING_ENABLED` / `PERCOLATOR_MAINNET_KEYPAIR` on this host.
+See [docs/agent-trading.md](docs/agent-trading.md).

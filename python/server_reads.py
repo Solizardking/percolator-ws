@@ -1,7 +1,7 @@
-"""Percolator.tech MCP — percolator_* READ tools only (writes disabled).
+"""Percolator.tech MCP — percolator_* reads, plus unsigned-tx write builders behind PERCOLATOR_WRITES_ENABLED.
 
 Reuses imperial-perps-mcp-server percolator_venue.py + vendored clawd_perps/.
-Never loads PERCOLATOR_DEVNET_KEYPAIR. Writes are not registered.
+Never loads PERCOLATOR_DEVNET_KEYPAIR. Writes are not registered unless PERCOLATOR_WRITES_ENABLED=true.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ READ_NAMES = {
     "percolator_oracle_price",
     "percolator_quote",
     "percolator_detect_venue",
+    "percolator_positions",
     # GM8z mainnet program reads (M4) — additive, mainnet-only, read-only.
     "percolator_gm8z_list_markets",
     "percolator_gm8z_read_market",
@@ -43,11 +44,9 @@ WRITE_NAMES = {
     "percolator_update_oracle",
 }
 
-_writes_on = os.environ.get("PERCOLATOR_MAINNET_WRITES_ENABLED", "false").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-# Also expose write tools when PERCOLATOR_WRITES_ENABLED (devnet unsigned path via venue gates)
-_writes_on = _writes_on or os.environ.get("PERCOLATOR_WRITES_ENABLED", "false").strip().lower() in (
+# Write tools (unsigned tx builders) register only with PERCOLATOR_WRITES_ENABLED. Mainnet builds additionally
+# need PERCOLATOR_MAINNET_WRITES_ENABLED plus confirm gates inside percolator_venue (and stay unsigned).
+_writes_on = os.environ.get("PERCOLATOR_WRITES_ENABLED", "false").strip().lower() in (
     "1", "true", "yes", "on",
 )
 
@@ -61,9 +60,10 @@ mcp = FastMCP(
     json_response=True,
     instructions=(
         "CLAWD Percolator tools for percolator.tech. "
-        "Reads always on. Write tools register only when PERCOLATOR_MAINNET_WRITES_ENABLED "
-        "or PERCOLATOR_WRITES_ENABLED is true; mainnet still requires confirm gates and never "
-        "server-signs/sends. Program is unaudited."
+        "Reads always on. Write tools register only when PERCOLATOR_WRITES_ENABLED is true; they "
+        "return UNSIGNED transactions plus a simulation for the user's wallet to sign. The server never "
+        "signs or sends. Mainnet additionally needs PERCOLATOR_MAINNET_WRITES_ENABLED and confirm gates. "
+        "Program is unaudited."
     ),
 )
 

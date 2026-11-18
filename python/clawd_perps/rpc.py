@@ -41,6 +41,13 @@ class Rpc:
     def latest_blockhash(self) -> str:
         return self.call("getLatestBlockhash", [{"commitment": "confirmed"}])["value"]["blockhash"]
 
+    def latest_blockhash_info(self) -> dict:
+        """{"blockhash", "lastValidBlockHeight"} at confirmed commitment."""
+        return self.call("getLatestBlockhash", [{"commitment": "confirmed"}])["value"]
+
+    def slot(self) -> int:
+        return self.call("getSlot", [{"commitment": "confirmed"}])
+
     def rent(self, size: int) -> int:
         return self.call("getMinimumBalanceForRentExemption", [size])
 
