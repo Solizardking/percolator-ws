@@ -33,7 +33,7 @@ export const TOOL_TIERS = {
 };
 
 // Tools served free to everyone: no x402 payment and no $CLAWD holder check.
-export const FREE_TOOLS = new Set(['get_health', 'percolator_list_markets', 'percolator_read_market', 'percolator_oracle_price', 'percolator_quote', 'percolator_detect_venue', 'percolator_gm8z_list_markets', 'percolator_gm8z_read_market', 'percolator_gm8z_oracle_price']);
+export const FREE_TOOLS = new Set(['get_health', 'percolator_list_markets', 'percolator_read_market', 'percolator_oracle_price', 'percolator_quote', 'percolator_detect_venue', 'percolator_positions', 'percolator_gm8z_list_markets', 'percolator_gm8z_read_market', 'percolator_gm8z_oracle_price']);
 export const isFreeTool = (name) => FREE_TOOLS.has(name);
 
 function parseJson(value) { try { return value ? JSON.parse(value) : null; } catch { return null; } }

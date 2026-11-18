@@ -1,11 +1,12 @@
 // Percolator read tools: proxy to the local Python FastMCP (imperial-perps percolator_venue).
-// Writes are never registered. Mockable via callImpl for tests.
+// Write tools (unsigned tx builders) only with PERCOLATOR_WRITES_ENABLED. Mockable via callImpl for tests.
 export const PERCOLATOR_READ_TOOLS = [
   'percolator_list_markets',
   'percolator_read_market',
   'percolator_oracle_price',
   'percolator_quote',
   'percolator_detect_venue',
+  'percolator_positions',
   'percolator_gm8z_list_markets',
   'percolator_gm8z_read_market',
   'percolator_gm8z_oracle_price',
@@ -21,8 +22,16 @@ export const PERCOLATOR_WRITE_TOOLS = [
 ];
 
 export function writesEnabled(env = process.env) {
-  const v = String(env.PERCOLATOR_MAINNET_WRITES_ENABLED || env.PERCOLATOR_WRITES_ENABLED || '').toLowerCase();
-  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  return flagOn(env.PERCOLATOR_WRITES_ENABLED);
+}
+
+export function mainnetWritesEnabled(env = process.env) {
+  return writesEnabled(env) && flagOn(env.PERCOLATOR_MAINNET_WRITES_ENABLED);
+}
+
+function flagOn(v) {
+  const s = String(v || '').toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
 }
 
 const SCHEMAS = {
@@ -56,6 +65,16 @@ const SCHEMAS = {
     properties: {
       slab: { type: 'string' },
       size: { type: 'integer', description: 'Base units; +long / -short' },
+      cluster: { type: 'string', enum: ['devnet', 'mainnet', 'localnet'], default: 'devnet' },
+      collateral: { type: 'integer', description: 'Collateral units to post; default initial margin + fee (max leverage)' },
+    },
+  },
+  percolator_positions: {
+    type: 'object',
+    required: ['owner'],
+    properties: {
+      owner: { type: 'string', description: 'Wallet (base58) that owns the trader accounts' },
+      market: { type: 'string', description: 'Optional slab; default scans every market of the program' },
       cluster: { type: 'string', enum: ['devnet', 'mainnet', 'localnet'], default: 'devnet' },
     },
   },
@@ -115,17 +134,19 @@ const SCHEMAS = {
     },
   },
   percolator_open_position: {
-    type: 'object', required: ['slab', 'owner', 'lp_owner', 'size'],
+    type: 'object', required: ['slab', 'owner', 'size'],
     properties: {
-      slab: { type: 'string' }, owner: { type: 'string' }, lp_owner: { type: 'string' }, size: { type: 'integer' },
+      slab: { type: 'string' }, owner: { type: 'string' }, size: { type: 'integer' },
+      deposit_amount: { type: 'integer', default: 0, description: 'Optional collateral deposited in the same tx' },
+      lp_idx: { type: 'integer' }, user_idx: { type: 'integer' },
       cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
       confirm_token: { type: 'string', default: '' },
     },
   },
   percolator_close_position: {
-    type: 'object', required: ['slab', 'owner', 'lp_owner'],
+    type: 'object', required: ['slab', 'owner'],
     properties: {
-      slab: { type: 'string' }, owner: { type: 'string' }, lp_owner: { type: 'string' },
+      slab: { type: 'string' }, owner: { type: 'string' }, lp_idx: { type: 'integer' }, user_idx: { type: 'integer' },
       cluster: { type: 'string', default: 'devnet' }, confirm: { type: 'boolean', default: false },
       confirm_token: { type: 'string', default: '' },
     },
@@ -144,17 +165,18 @@ const DESCRIPTIONS = {
   percolator_list_markets: 'List CLAWD Percolator perps markets (slabs) on a cluster (default devnet). Read-only.',
   percolator_read_market: 'Decode a CLAWD Percolator slab: config, pool-oracle state, engine totals.',
   percolator_oracle_price: 'Current index price of a market (pool EMA or admin-pushed).',
-  percolator_quote: 'Quote a position (size in base units, +long/-short): notional, margin, fee, leverage cap.',
+  percolator_quote: 'Quote a position (size in base units, +long/-short): notional, margins, fee, leverage cap, liquidation price and funding from on-chain params. Read-only.',
+  percolator_positions: 'Read-only: an owner\'s positions (side, size, entry, collateral, uPnL, liquidation price, funding) on one or all CLAWD Percolator markets.',
   percolator_detect_venue: 'Detect pump.fun / PumpSwap / LaunchLab pool for a mint and perps eligibility. Read-only.',
   percolator_gm8z_list_markets: 'List GM8z (toly\'s percolator program on Solana MAINNET) perps markets/slabs. Read-only.',
   percolator_gm8z_read_market: 'Decode a GM8z mainnet slab: config, oracle state, engine totals (optionally accounts). Read-only.',
   percolator_gm8z_oracle_price: 'Current GM8z mainnet mark price (authority push or Pyth; no pool oracle exists). Read-only.',
-  percolator_create_user_market: 'Create a permissionless perps market (unsigned on mainnet when enabled). UNAUDITED.',
-  percolator_deposit: 'Deposit collateral. Mainnet: unsigned tx for user wallet when enabled. UNAUDITED.',
-  percolator_withdraw: 'Withdraw collateral. Mainnet: unsigned tx for user wallet when enabled. UNAUDITED.',
-  percolator_open_position: 'Open/increase position. Mainnet: unsigned tx when enabled. UNAUDITED.',
-  percolator_close_position: 'Close position. Mainnet: unsigned tx when enabled. UNAUDITED.',
-  percolator_update_oracle: 'Update pool oracle EMA. Mainnet: unsigned tx when enabled. UNAUDITED.',
+  percolator_create_user_market: 'Build an UNSIGNED create-market tx (creator signs) + simulation. Server never signs/sends. UNAUDITED.',
+  percolator_deposit: 'Build an UNSIGNED deposit tx (owner signs) + simulation. Server never signs/sends. UNAUDITED.',
+  percolator_withdraw: 'Build an UNSIGNED withdraw tx (owner signs) + simulation. Server never signs/sends. UNAUDITED.',
+  percolator_open_position: 'Build an UNSIGNED open tx: UpdatePoolPrice -> KeeperCrank -> optional Deposit -> TradeCpi (owner is the only signer) + simulation. UNAUDITED.',
+  percolator_close_position: 'Build an UNSIGNED close-all tx via TradeCpi (owner is the only signer) + simulation. UNAUDITED.',
+  percolator_update_oracle: 'Build an UNSIGNED UpdatePoolPrice tx (caller signs) + simulation. UNAUDITED.',
 };
 
 export function createPercolator({ env = process.env, fetchImpl = fetch, callImpl = null } = {}) {
@@ -207,7 +229,7 @@ export function createPercolator({ env = process.env, fetchImpl = fetch, callImp
       pyMcp: base,
       tradingEnabled: false,
       keypairSet: false,
-      mainnetWritesEnabled: writesEnabled(env),
+      mainnetWritesEnabled: mainnetWritesEnabled(env),
     }),
   };
 }

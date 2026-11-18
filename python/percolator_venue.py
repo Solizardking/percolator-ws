@@ -1,17 +1,21 @@
-"""CLAWD Percolator venue for the Imperial MCP server.
+"""CLAWD Percolator venue for the Percolator MCP (percolator-ws) and the Imperial MCP server.
 
 Permissionless perps markets on pump.fun / PumpSwap / Raydium LaunchLab (Stonk.fun) tokens, priced
 by an in-program pool oracle, with CLAWD (Token-2022) collateral. Program source:
 github.com/Solizardking/clawd-market (private). Unaudited: **devnet by default**.
 
-Safety model (fail-closed, mirrors check_live_gate):
-* cluster defaults to "devnet". Mainnet writes are OFF unless PERCOLATOR_MAINNET_WRITES_ENABLED=true
-  AND confirm=true AND confirm_token="CONFIRM_PERCOLATOR_TX" AND cluster=mainnet. The program is **unaudited**.
-* every write needs confirm=true AND confirm_token="CONFIRM_PERCOLATOR_TX". Otherwise it only builds and
-  simulates the transaction and returns the plan (devnet/localnet).
-* with confirmation the server returns a base64 transaction for the user's wallet to sign. The server only
-  signs and sends itself on **devnet/localnet** when PERCOLATOR_DEVNET_KEYPAIR is set and is the fee payer.
-  On **mainnet** the server never signs, never sends, and refuses any mainnet keypair env. Key material is never returned or logged.
+Safety model (fail-closed):
+* The server NEVER signs or sends a user transaction, on any cluster. Write tools build an UNSIGNED
+  transaction (user = fee payer and only signer, recent blockhash), simulate it (sigVerify off), and return
+  it base64 for the user's own wallet to sign and submit. The only signature the server ever adds is a
+  freshly generated throwaway slab key in percolator_create_user_market (a new account address).
+* The server refuses to build anything if PERCOLATOR_DEVNET_KEYPAIR or PERCOLATOR_MAINNET_KEYPAIR is set.
+* Write tools are only registered when PERCOLATOR_WRITES_ENABLED=true (see server_reads.py).
+* cluster defaults to "devnet". Mainnet stays gated: PERCOLATOR_MAINNET_WRITES_ENABLED=true AND confirm=true
+  AND confirm_token="CONFIRM_PERCOLATOR_TX", and it is still unsigned-only. The program is **unaudited**.
+* Trades use TradeCpi against the market's matcher-backed LP so the user is the only signer, in the same
+  order as the browser devnet app (app/src/lib/percolator.ts tradeIxs): UpdatePoolPrice (pool markets),
+  KeeperCrank, optional Deposit, TradeCpi.
 * size/leverage and oracle price-drift caps are enforced before building trade txs.
 """
 from __future__ import annotations
@@ -19,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import time
 from typing import Any, Callable, Optional
 
 from solders.hash import Hash
@@ -31,7 +36,7 @@ from clawd_perps import ix as I
 from clawd_perps.cli import auto_pow10
 from clawd_perps.layout import CLUSTERS, TIERS, decode_slab, slab_len
 from clawd_perps.rpc import Rpc
-from clawd_perps.tx import load_keypair
+from clawd_perps import risk as R
 from clawd_perps.venue import detect_venue, eligibility
 
 CONFIRM_TOKEN = "CONFIRM_PERCOLATOR_TX"
@@ -59,47 +64,37 @@ def mainnet_writes_enabled() -> bool:
 
 
 def write_gate(cluster: str, confirm: bool, confirm_token: str) -> Optional[dict[str, Any]]:
-    """None = confirmed write allowed. Else a refusal / dry-run marker.
+    """None = build allowed. Else a refusal.
 
-    Mainnet requires PERCOLATOR_MAINNET_WRITES_ENABLED + confirm + token; even then the
-    server only builds+simulates unsigned txs (never signs/sends). Program is unaudited.
+    Devnet/localnet: always allowed (the result is an unsigned tx plus a simulation; nothing is sent).
+    Mainnet: requires PERCOLATOR_MAINNET_WRITES_ENABLED + confirm + token; still unsigned-only.
     """
-    if cluster == "mainnet":
-        if not mainnet_writes_enabled():
-            return {"ok": False, "refused": True, "submitted": False, "gate": "mainnet-writes-disabled",
-                    "unaudited": True,
-                    "speech": "CLAWD Percolator is unaudited; mainnet writes are disabled. "
-                              "Set PERCOLATOR_MAINNET_WRITES_ENABLED=true to allow unsigned user-signed txs."}
-        missing = []
-        if confirm is not True:
-            missing.append("confirm=true")
-        if confirm_token != CONFIRM_TOKEN:
-            missing.append(f'confirm_token="{CONFIRM_TOKEN}"')
-        if missing:
-            return {"ok": False, "refused": True, "submitted": False, "gate": "mainnet-confirm-required",
-                    "missing": missing, "unaudited": True,
-                    "speech": "Mainnet write refused: " + ", ".join(missing)
-                              + ". Program is unaudited; server never signs or broadcasts on mainnet."}
+    if cluster != "mainnet":
         return None
+    if not mainnet_writes_enabled():
+        return {"ok": False, "refused": True, "submitted": False, "gate": "mainnet-writes-disabled",
+                "unaudited": True,
+                "speech": "CLAWD Percolator is unaudited; mainnet writes are disabled. "
+                          "Set PERCOLATOR_MAINNET_WRITES_ENABLED=true to allow unsigned user-signed txs."}
     missing = []
     if confirm is not True:
         missing.append("confirm=true")
     if confirm_token != CONFIRM_TOKEN:
         missing.append(f'confirm_token="{CONFIRM_TOKEN}"')
     if missing:
-        return {"dry_run": True, "missing": missing}
+        return {"ok": False, "refused": True, "submitted": False, "gate": "mainnet-confirm-required",
+                "missing": missing, "unaudited": True,
+                "speech": "Mainnet write refused: " + ", ".join(missing)
+                          + ". Program is unaudited; server never signs or broadcasts on mainnet."}
     return None
 
 
-def _server_signer(cluster: str) -> Optional[Keypair]:
-    # Never load or use a keypair for mainnet.
-    if cluster == "mainnet":
-        return None
-    if os.environ.get("PERCOLATOR_MAINNET_KEYPAIR"):
-        # Fail closed even on other clusters if a mainnet keypair path was set.
-        return None
-    path = os.environ.get("PERCOLATOR_DEVNET_KEYPAIR")
-    return load_keypair(path) if path else None
+def keypair_env_refusal() -> Optional[dict[str, Any]]:
+    for k in ("PERCOLATOR_MAINNET_KEYPAIR", "PERCOLATOR_DEVNET_KEYPAIR"):
+        if os.environ.get(k):
+            return {"ok": False, "refused": True, "submitted": False, "gate": "server-keypair-forbidden",
+                    "speech": f"{k} must not be set: this server never signs user transactions."}
+    return None
 
 
 def check_trade_caps(m: dict[str, Any], size: int) -> Optional[dict[str, Any]]:
@@ -130,56 +125,56 @@ def check_trade_caps(m: dict[str, Any], size: int) -> Optional[dict[str, Any]]:
     return None
 
 
-def _sync_write(cluster: str, ixs: list, fee_payer: Pubkey, ephemeral: list[Keypair], confirm: bool,
-                confirm_token: str, extra: dict[str, Any]) -> dict[str, Any]:
-    if os.environ.get("PERCOLATOR_MAINNET_KEYPAIR"):
-        return {"ok": False, "refused": True, "submitted": False, "gate": "mainnet-keypair-forbidden",
-                "unaudited": True,
-                "speech": "PERCOLATOR_MAINNET_KEYPAIR must never be set; server refuses to proceed."}
-    gate = write_gate(cluster, confirm, confirm_token)
-    if gate and gate.get("refused"):
-        return gate
-    rpc = rpc_for(cluster)
-    bh = Hash.from_string(rpc.latest_blockhash())
+def build_unsigned(ixs: list, fee_payer: Pubkey, blockhash: str, ephemeral: Optional[list[Keypair]] = None) -> dict[str, Any]:
+    """Pure: legacy tx with fee_payer as payer, zeroed user signatures. Returns b64 + required signers."""
+    bh = Hash.from_string(blockhash)
     msg = Message.new_with_blockhash(ixs, fee_payer, bh)
     tx = Transaction.new_unsigned(msg)
-    # Mainnet: never server-sign. Devnet: optional throwaway keypair only.
-    signer = _server_signer(cluster)
-    server_signs = signer is not None and signer.pubkey() == fee_payer and cluster != "mainnet"
-    # Ephemeral slab keys (create_user_market) may be signed by the server; fee payer / user never on mainnet.
-    keys = list(ephemeral) + ([signer] if server_signs else [])
-    if keys:
-        tx.partial_sign(keys, bh)
-    b64 = base64.b64encode(bytes(tx)).decode()
-    sim = rpc.simulate_b64(b64)
-    out: dict[str, Any] = {"ok": sim.get("err") is None, "cluster": cluster, "program_id": str(program_id()),
-                           "unaudited": True if cluster == "mainnet" else False,
-                           "simulation": {"err": sim.get("err"), "units": sim.get("unitsConsumed"),
-                                          "logs": (sim.get("logs") or [])[-12:]}, **extra}
-    if gate:  # dry run (devnet/localnet only)
-        out.update({"submitted": False, "dry_run": True, "missing": gate["missing"],
-                    "speech": "Simulated only. Re-run with confirm=true and confirm_token to proceed."})
-        return out
-    if sim.get("err"):
-        out.update({"submitted": False, "speech": "Simulation failed; nothing was sent."})
-        return out
-    signers_needed = [str(k) for k in msg.account_keys[:msg.header.num_required_signatures]]
-    signed = {str(k.pubkey()) for k in keys}
-    missing = [s for s in signers_needed if s not in signed]
-    if cluster == "mainnet":
-        # Never broadcast on mainnet — always return unsigned (user fee-payer) tx.
-        out.update({"submitted": False, "server_signed": False, "transaction_base64": b64,
-                    "signers_needed": missing or signers_needed,
-                    "unaudited": True,
-                    "speech": "UNAUDITED mainnet: transaction built+simulated only. "
-                              "Sign with your wallet and submit yourself; this server will not sign or send."})
-        return out
-    if missing:
-        out.update({"submitted": False, "transaction_base64": b64, "signers_needed": missing,
-                    "speech": f"Transaction built on {cluster}. Sign with your wallet ({len(missing)} signature(s)) and send."})
-        return out
-    sig = rpc.send_b64(b64)
-    out.update({"submitted": True, "signature": sig, "speech": f"Sent on {cluster}: {sig[:12]}..."})
+    eph = list(ephemeral or [])
+    if eph:
+        tx.partial_sign(eph, bh)
+    signers = [str(k) for k in msg.account_keys[:msg.header.num_required_signatures]]
+    eph_keys = {str(k.pubkey()) for k in eph}
+    return {"transaction_base64": base64.b64encode(bytes(tx)).decode(),
+            "message_base64": base64.b64encode(bytes(msg)).decode(),
+            "fee_payer": str(fee_payer), "recent_blockhash": blockhash,
+            "signers_needed": [k for k in signers if k not in eph_keys],
+            "instructions": len(ixs)}
+
+
+def _sync_write(cluster: str, ixs: list, fee_payer: Pubkey, ephemeral: list[Keypair], confirm: bool,
+                confirm_token: str, extra: dict[str, Any]) -> dict[str, Any]:
+    refusal = keypair_env_refusal()
+    if refusal:
+        return refusal
+    gate = write_gate(cluster, confirm, confirm_token)
+    if gate:
+        return gate
+    rpc = rpc_for(cluster)
+    bh = rpc.latest_blockhash_info()
+    built = build_unsigned(ixs, fee_payer, bh["blockhash"], ephemeral)
+    sim = rpc.simulate_b64(built["transaction_base64"])
+    ok = sim.get("err") is None
+    out: dict[str, Any] = {
+        "ok": ok, "cluster": cluster, "program_id": str(program_id()), "submitted": False, "server_signed": False,
+        "unaudited": True, **built, "last_valid_block_height": bh.get("lastValidBlockHeight"),
+        "simulation": {"err": sim.get("err"), "units": sim.get("unitsConsumed"), "logs": (sim.get("logs") or [])[-20:]},
+        **extra,
+    }
+    if not ok:
+        out["speech"] = "Simulation failed; fix the inputs before signing. Nothing was sent."
+        ost = extra.get("oracle_status") or {}
+        if ost.get("stale"):
+            out["speech"] = "Simulation failed: " + ost["error"] + " Nothing was sent."
+    else:
+        out["speech"] = (f"Unsigned {cluster} transaction built and simulated "
+                         f"({sim.get('unitsConsumed')} CU). Sign it with your wallet and submit it yourself.")
+    out["next_steps"] = [
+        "Show the owner the quote and this simulation; get a yes for this exact transaction.",
+        "Deserialize transaction_base64 (legacy Transaction) in the owner's wallet and sign it there.",
+        f"Submit the signed bytes to a {cluster} RPC (sendTransaction) before last_valid_block_height.",
+        "Read back with percolator_positions(owner, market).",
+    ]
     return out
 
 
@@ -213,6 +208,103 @@ def _summary(m: dict[str, Any]) -> dict[str, Any]:
 
 def _err(tool: str, e: Exception) -> dict[str, Any]:
     return {"ok": False, "tool": tool, "error": str(e)[:400], "speech": f"{tool} failed: {str(e)[:120]}"}
+
+
+def market_price_e6(m: dict[str, Any]) -> int:
+    p = m["pool"]
+    return int(p["ema_price_e6"] if p["kind"] else (m["last_effective_price_e6"] or m["authority_price_e6"]))
+
+
+def oracle_status(m: dict[str, Any], now_ts: Optional[int] = None) -> dict[str, Any]:
+    """Admin-oracle markets need a pushed price younger than max_staleness_secs, or the program falls back to
+    reading the oracle account as Pyth/Chainlink and every crank/trade/withdraw fails (IllegalOwner)."""
+    if m["pool"]["kind"]:
+        return {"source": m["pool"]["kind_name"], "stale": False}
+    now = int(time.time()) if now_ts is None else int(now_ts)
+    age = now - int(m.get("authority_timestamp") or 0)
+    max_age = int(m.get("max_staleness_secs") or 0)
+    stale = (not m.get("authority_price_e6")) or age < 0 or age > max_age
+    out = {"source": "admin-oracle", "stale": stale, "age_secs": age, "max_staleness_secs": max_age}
+    if stale:
+        out["error"] = ("admin oracle price is stale: the market's keeper has not pushed a price within "
+                        f"{max_age}s (last push {age}s ago). Crank, trade and withdraw will fail until it does.")
+    return out
+
+
+def quote_from_market(m: dict[str, Any], size: int, collateral: Optional[int] = None,
+                      now_ts: Optional[int] = None) -> dict[str, Any]:
+    """Pure: quote dict from a decoded market (keeps the original fields, adds liquidation + funding)."""
+    s = _summary(m)
+    price = s["price_e6"]
+    eng = m["engine"]
+    q = R.quote(size, price, eng["params"], int(eng.get("funding_rate_bps_per_slot") or 0), collateral)
+    out = {"ok": True, "slab": m["slab"], "side": "long" if size > 0 else "short", "size": size,
+           "price_e6": price, "notional_units": q["notional_units"],
+           "initial_margin_units": q["initial_margin_units"],
+           "maintenance_margin_units": q["maintenance_margin_units"],
+           "fee_units": q["fee_units"], "max_leverage": s["max_leverage"],
+           "tradable": not (s["paused"] or s["resolved"] or s["migrated"] or oracle_status(m, now_ts)["stale"]),
+           "oracle_status": oracle_status(m, now_ts),
+           "collateral_units": q["collateral_units"], "meets_initial_margin": q["meets_initial_margin"],
+           "effective_leverage": q["effective_leverage"], "liquidation_price_e6": q["liquidation_price_e6"],
+           "liquidation_fee_bps": q["liquidation_fee_bps"], "funding": q["funding"],
+           "oracle": s["oracle"], "assumptions": q["assumptions"]}
+    if not m["pool"]["kind"]:
+        out["warning"] = "admin-pushed oracle: a single key sets this price"
+    out["speech"] = (f"{out['side']} {abs(size)}: notional {q['notional_units']}, margin {q['initial_margin_units']}, "
+                     f"liq price_e6 {q['liquidation_price_e6']}, funding {q['funding']['direction']}.")
+    return out
+
+
+def matcher_lp(m: dict[str, Any], lp_idx: Optional[int] = None) -> dict[str, Any]:
+    lps = [a for a in m.get("accounts") or [] if a["kind"] == "lp"]
+    if lp_idx is not None:
+        lp = next((a for a in lps if a["idx"] == lp_idx), None)
+        if lp is None:
+            raise ValueError(f"no LP at index {lp_idx}")
+    else:
+        lp = next((a for a in lps if a.get("matcher_program") == str(I.MATCHER_PROGRAM)), None)
+        if lp is None:
+            raise ValueError("this market has no matcher-backed LP yet (operator runs setup:lp)")
+    if lp.get("matcher_program") in (None, "11111111111111111111111111111111"):
+        raise ValueError(f"LP {lp['idx']} is not matcher-backed; TradeCpi needs a matcher LP")
+    return lp
+
+
+def trade_ixs(m: dict[str, Any], prog: Pubkey, slab: Pubkey, user: Pubkey, uata: Pubkey, vault: Pubkey,
+              tp: Pubkey, oracle: Pubkey, size: int, user_idx: int, lp_idx: Optional[int] = None,
+              deposit_amount: int = 0) -> list:
+    """Pure: same order as app/src/lib/percolator.ts tradeIxs. User is the only signer."""
+    if size == 0:
+        raise ValueError("size must be non-zero")
+    lp = matcher_lp(m, lp_idx)
+    ixs = []
+    if m["pool"]["kind"]:
+        vaults = (Pubkey.from_string(m["pool"]["base_vault"]), Pubkey.from_string(m["pool"]["quote_vault"])) \
+            if m["pool"]["kind"] == I.KIND_PUMPSWAP else None
+        ixs.append(I.update_pool_price(prog, user, slab, oracle, vaults))
+    ixs.append(I.keeper_crank(prog, user, slab, oracle))
+    if deposit_amount and deposit_amount > 0:
+        ixs.append(I.deposit(prog, user, slab, uata, vault, tp, user_idx, deposit_amount))
+    ixs.append(I.trade_cpi(prog, user, Pubkey.from_string(lp["owner"]), slab, oracle,
+                           Pubkey.from_string(lp["matcher_program"]), Pubkey.from_string(lp["matcher_context"]),
+                           lp["idx"], user_idx, size))
+    return ixs
+
+
+def positions_for_owner(markets: list[dict[str, Any]], owner: str, now_slot: Optional[int] = None) -> list[dict[str, Any]]:
+    """Pure: decoded markets -> position rows for owner's user accounts."""
+    rows = []
+    for m in markets:
+        price = market_price_e6(m)
+        for a in m.get("accounts") or []:
+            if a["kind"] != "user" or a["owner"] != owner:
+                continue
+            row = R.position(a, m["engine"], price, now_slot)
+            row.update({"market": m["slab"], "oracle": m["pool"]["kind_name"],
+                        "collateral_mint": m["collateral_mint"]})
+            rows.append(row)
+    return rows
 
 
 def register(tool: Callable[..., Any]) -> list[str]:
@@ -289,23 +381,16 @@ def register(tool: Callable[..., Any]) -> list[str]:
         return d
 
     @tool()
-    async def percolator_quote(slab: str, size: int, cluster: str = "devnet") -> dict[str, Any]:
-        """Quote a position (size in base units, +long/-short): notional, initial margin, fee, leverage cap."""
+    async def percolator_quote(slab: str, size: int, cluster: str = "devnet",
+                               collateral: Optional[int] = None) -> dict[str, Any]:
+        """Quote a position (size in base units, +long/-short): notional, margins, fee, leverage cap, plus
+        liquidation price and funding from on-chain params. collateral (collateral units) defaults to
+        initial margin + fee, i.e. max leverage. Read-only."""
         try:
             m = await asyncio.to_thread(_market, rpc_for(cluster), slab)
         except Exception as e:
             return _err("percolator_quote", e)
-        s = _summary(m)
-        notional = abs(size) * s["price_e6"] // 10**6
-        prm = m["engine"]["params"]
-        out = {"ok": True, "slab": slab, "side": "long" if size > 0 else "short", "size": size,
-               "price_e6": s["price_e6"], "notional_units": notional,
-               "initial_margin_units": notional * prm["initial_margin_bps"] // 10_000,
-               "maintenance_margin_units": notional * prm["maintenance_margin_bps"] // 10_000,
-               "fee_units": notional * prm["trading_fee_bps"] // 10_000, "max_leverage": s["max_leverage"],
-               "tradable": not (s["paused"] or s["resolved"] or s["migrated"])}
-        out["speech"] = f"{out['side']} {abs(size)}: notional {notional}, margin {out['initial_margin_units']} collateral units."
-        return out
+        return quote_from_market(m, size, collateral)
 
     @tool()
     async def percolator_create_user_market(mint: str, collateral_mint: str, creator: str, bond: int,
@@ -315,8 +400,9 @@ def register(tool: Callable[..., Any]) -> list[str]:
                                             confirm_token: str = "") -> dict[str, Any]:
         """Create a permissionless perps market on a pump.fun / PumpSwap / LaunchLab token. One atomic tx:
         create slab + vault, InitMarket, ConfigurePoolOracle, TopUpInsurance(bond). The creator is the admin, but
-        pool markets lock every admin price lever. Devnet default. Simulates unless confirm=true and
-        confirm_token="CONFIRM_PERCOLATOR_TX". Mainnet needs PERCOLATOR_MAINNET_WRITES_ENABLED (unsigned only)."""
+        pool markets lock every admin price lever. Devnet default. Returns an UNSIGNED tx (creator signs; the server
+        only adds the fresh slab key's signature) plus a simulation. Mainnet needs PERCOLATOR_MAINNET_WRITES_ENABLED,
+        confirm=true and confirm_token="CONFIRM_PERCOLATOR_TX" (still unsigned)."""
         if cluster == "mainnet":
             g = write_gate(cluster, confirm, confirm_token)
             if g:
@@ -378,8 +464,8 @@ def register(tool: Callable[..., Any]) -> list[str]:
             ixs = build(m, prog, s, o, I.ata(o, mint, tp), vault, tp, oracle)
         except Exception as e:
             return _err(tool_name, e)
-        return await _write(cluster, ixs, o, [], confirm, confirm_token,
-                            {"slab": slab, "tool": tool_name, "unaudited_program": True})
+        extra = {"slab": slab, "tool": tool_name, "unaudited_program": True, "oracle_status": oracle_status(m)}
+        return await _write(cluster, ixs, o, [], confirm, confirm_token, extra)
 
     def _idx(m: dict, owner: Pubkey, idx: Optional[int]) -> int:
         if idx is not None:
@@ -393,7 +479,8 @@ def register(tool: Callable[..., Any]) -> list[str]:
     async def percolator_deposit(slab: str, owner: str, amount: int, user_idx: Optional[int] = None,
                                  init: bool = False, cluster: str = "devnet", confirm: bool = False,
                                  confirm_token: str = "") -> dict[str, Any]:
-        """Deposit collateral (base units). init=true first opens the trader account (InitUser). Devnet default; gated."""
+        """Build an UNSIGNED deposit tx (collateral base units). init=true opens the trader account (InitUser) first;
+        with init and no user_idx only InitUser is built (deposit in a second tx once the index is known)."""
         def build(m, prog, s, o, uata, vault, tp, oracle):
             ixs = []
             if init:
@@ -409,44 +496,39 @@ def register(tool: Callable[..., Any]) -> list[str]:
     @tool()
     async def percolator_withdraw(slab: str, owner: str, amount: int, user_idx: Optional[int] = None,
                                   cluster: str = "devnet", confirm: bool = False, confirm_token: str = "") -> dict[str, Any]:
-        """Withdraw collateral (margin-checked on-chain at the oracle price). Devnet default; gated."""
+        """Build an UNSIGNED withdraw tx (margin-checked on-chain at the oracle price). Devnet default."""
         def build(m, prog, s, o, uata, vault, tp, oracle):
             return [I.withdraw(prog, o, s, vault, uata, tp, oracle, _idx(m, o, user_idx), amount)]
         return await _user_tx("percolator_withdraw", slab, owner, cluster, confirm, confirm_token, build)
 
-    async def _trade(tool_name, slab, owner, lp_owner, size, lp_idx, user_idx, cluster, confirm, confirm_token):
+    async def _trade(tool_name, slab, owner, size, lp_idx, user_idx, deposit_amount, cluster, confirm, confirm_token):
         def build(m, prog, s, o, uata, vault, tp, oracle):
-            lp = Pubkey.from_string(lp_owner)
-            li = lp_idx
-            if li is None:
-                li = next(a["idx"] for a in m.get("accounts") or [] if a["kind"] == "lp" and a["owner"] == lp_owner)
-            ixs = []
-            if m["pool"]["kind"]:
-                vaults = (Pubkey.from_string(m["pool"]["base_vault"]), Pubkey.from_string(m["pool"]["quote_vault"])) \
-                    if m["pool"]["kind"] == I.KIND_PUMPSWAP else None
-                ixs.append(I.update_pool_price(prog, o, s, oracle, vaults))
-            ixs.append(I.trade_no_cpi(prog, o, lp, s, oracle, li, _idx(m, o, user_idx), size))
-            return ixs
+            return trade_ixs(m, prog, s, o, uata, vault, tp, oracle, size, _idx(m, o, user_idx),
+                             lp_idx=lp_idx, deposit_amount=deposit_amount)
         return await _user_tx(tool_name, slab, owner, cluster, confirm, confirm_token, build, size=size)
 
     @tool()
-    async def percolator_open_position(slab: str, owner: str, lp_owner: str, size: int, lp_idx: Optional[int] = None,
+    async def percolator_open_position(slab: str, owner: str, size: int, deposit_amount: int = 0,
+                                       lp_owner: Optional[str] = None, lp_idx: Optional[int] = None,
                                        user_idx: Optional[int] = None, cluster: str = "devnet", confirm: bool = False,
                                        confirm_token: str = "") -> dict[str, Any]:
-        """Open/increase a position against an LP (size base units, +long/-short). Refreshes the pool oracle first.
-        TradeNoCpi needs the LP's co-signature (devnet). Gated; mainnet unsigned-only when PERCOLATOR_MAINNET_WRITES_ENABLED."""
-        return await _trade("percolator_open_position", slab, owner, lp_owner, size, lp_idx, user_idx,
+        """Build an UNSIGNED tx that opens/increases a position (size base units, +long/-short) against the market's
+        matcher-backed LP: UpdatePoolPrice (pool markets) -> KeeperCrank -> optional Deposit(deposit_amount) ->
+        TradeCpi. The owner is fee payer and the only signer. Returns transaction_base64 plus a simulation.
+        The server never signs or sends. lp_owner is accepted for compatibility and ignored."""
+        return await _trade("percolator_open_position", slab, owner, size, lp_idx, user_idx, deposit_amount,
                             cluster, confirm, confirm_token)
 
     @tool()
-    async def percolator_close_position(slab: str, owner: str, lp_owner: str, user_idx: Optional[int] = None,
-                                        lp_idx: Optional[int] = None, cluster: str = "devnet", confirm: bool = False,
+    async def percolator_close_position(slab: str, owner: str, lp_owner: Optional[str] = None,
+                                        user_idx: Optional[int] = None, lp_idx: Optional[int] = None,
+                                        cluster: str = "devnet", confirm: bool = False,
                                         confirm_token: str = "") -> dict[str, Any]:
-        """Close the owner's whole position (trades the opposite of the current size). Gated; mainnet unsigned if enabled."""
-        if cluster == "mainnet":
-            g = write_gate(cluster, confirm, confirm_token)
-            if g:
-                return g
+        """Build an UNSIGNED tx that closes the owner's whole position (trades the opposite of the current size)
+        via TradeCpi. Same signing model as percolator_open_position."""
+        g = write_gate(cluster, confirm, confirm_token)
+        if g:
+            return g
         try:
             m = await asyncio.to_thread(_market, rpc_for(cluster), slab)
             o = Pubkey.from_string(owner)
@@ -456,8 +538,39 @@ def register(tool: Callable[..., Any]) -> list[str]:
             return _err("percolator_close_position", e)
         if pos == 0:
             return {"ok": True, "submitted": False, "speech": "No open position."}
-        return await _trade("percolator_close_position", slab, owner, lp_owner, -pos, lp_idx, i,
+        return await _trade("percolator_close_position", slab, owner, -pos, lp_idx, i, 0,
                             cluster, confirm, confirm_token)
+
+    @tool()
+    async def percolator_positions(owner: str, market: Optional[str] = None, cluster: str = "devnet") -> dict[str, Any]:
+        """Read-only: the owner's positions on one market (slab) or every market of the program. Side, size, entry,
+        collateral, unrealized PnL (mark + settled - pending funding), equity, liquidation price, funding."""
+        def go():
+            rpc = rpc_for(cluster)
+            Pubkey.from_string(owner)
+            if market:
+                markets = [_market(rpc, market)]
+            else:
+                markets = []
+                for size in SLAB_SIZES:
+                    for a in rpc.call("getProgramAccounts", [str(program_id()), {
+                            "encoding": "base64", "commitment": "confirmed", "filters": [{"dataSize": size}]}]):
+                        try:
+                            mm = decode_slab(base64.b64decode(a["account"]["data"][0]))
+                            mm["slab"] = a["pubkey"]
+                            markets.append(mm)
+                        except Exception:
+                            continue
+            return markets, rpc.slot()
+        try:
+            markets, now_slot = await asyncio.to_thread(go)
+        except Exception as e:
+            return _err("percolator_positions", e)
+        rows = positions_for_owner(markets, owner, now_slot)
+        open_rows = [r for r in rows if r["side"] != "flat"]
+        return {"ok": True, "cluster": cluster, "owner": owner, "slot": now_slot, "count": len(rows),
+                "open": len(open_rows), "positions": rows,
+                "speech": f"{len(open_rows)} open position(s) for {owner[:6]} on {cluster}."}
 
     @tool()
     async def percolator_update_oracle(slab: str, keeper: str, cluster: str = "devnet", confirm: bool = False,
@@ -473,4 +586,4 @@ def register(tool: Callable[..., Any]) -> list[str]:
 
     return ["percolator_list_markets", "percolator_read_market", "percolator_oracle_price", "percolator_detect_venue",
             "percolator_quote", "percolator_create_user_market", "percolator_deposit", "percolator_withdraw",
-            "percolator_open_position", "percolator_close_position", "percolator_update_oracle"]
+            "percolator_open_position", "percolator_close_position", "percolator_update_oracle", "percolator_positions"]

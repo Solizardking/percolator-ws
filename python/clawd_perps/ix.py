@@ -20,6 +20,8 @@ LAUNCHLAB_PROGRAM = {
     # Devnet build of the program (feature `devnet`) expects this owner; unverified as LaunchLab.
     "devnet": Pubkey.from_string("DRay6fNdQ5J82H7xV6uq2aV3mNrUZ1J4PgSKsWgptcm6"),
 }
+# percolator-match passive matcher deployed on devnet (app/src/lib/percolator.ts MATCHER_PROGRAM_ID).
+MATCHER_PROGRAM = Pubkey.from_string("4urzQCupvnMWvGTovGZsYSWNaGFA9WjsztBYEQJeNnAS")
 WSOL = Pubkey.from_string("So11111111111111111111111111111111111111112")
 
 KIND_NONE, KIND_PUMP_CURVE, KIND_LAUNCHLAB, KIND_PUMPSWAP = 0, 1, 2, 3
@@ -39,6 +41,10 @@ def _s(k: Pubkey, writable: bool = True) -> AccountMeta:
 
 def vault_authority(program_id: Pubkey, slab: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([b"vault", bytes(slab)], program_id)[0]
+
+
+def lp_pda(program_id: Pubkey, slab: Pubkey, lp_idx: int) -> Pubkey:
+    return Pubkey.find_program_address([b"lp", bytes(slab), struct.pack("<H", lp_idx)], program_id)[0]
 
 
 def ata(owner: Pubkey, mint: Pubkey, token_program: Pubkey = TOKEN_PROGRAM) -> Pubkey:
@@ -135,6 +141,15 @@ def trade_no_cpi(program_id: Pubkey, user: Pubkey, lp: Pubkey, slab: Pubkey, ora
                  user_idx: int, size: int) -> Instruction:
     data = bytes([6]) + struct.pack("<HH", lp_idx, user_idx) + int(size).to_bytes(16, "little", signed=True)
     return Instruction(program_id, data, [_s(user), _s(lp), _w(slab), _r(SYSVAR_CLOCK), _r(oracle)])
+
+
+def trade_cpi(program_id: Pubkey, user: Pubkey, lp_owner: Pubkey, slab: Pubkey, oracle: Pubkey,
+              matcher_program: Pubkey, matcher_context: Pubkey, lp_idx: int, user_idx: int, size: int) -> Instruction:
+    """Permissionless trade against a matcher-backed LP: only the user signs (tag 10, mirrors tradeCpi in percolator.ts)."""
+    data = bytes([10]) + struct.pack("<HH", lp_idx, user_idx) + int(size).to_bytes(16, "little", signed=True)
+    return Instruction(program_id, data, [
+        _s(user), _r(lp_owner), _w(slab), _r(SYSVAR_CLOCK), _r(oracle), _r(matcher_program), _w(matcher_context),
+        _r(lp_pda(program_id, slab, lp_idx))])
 
 
 def close_account(program_id: Pubkey, user: Pubkey, slab: Pubkey, vault: Pubkey, user_ata: Pubkey,
